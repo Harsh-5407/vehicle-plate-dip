@@ -1,15 +1,10 @@
 import os
-import platform
+import re
 import base64
 import cv2
 import numpy as np
-import pytesseract
 import onnxruntime as ort
-
-if platform.system() == "Windows":
-    win_tesseract = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-    if os.path.exists(win_tesseract):
-        pytesseract.pytesseract.tesseract_cmd = win_tesseract
+from rapidocr_onnxruntime import RapidOCR
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "plate_detector.onnx")
 ort_session = None
@@ -22,12 +17,52 @@ if os.path.exists(MODEL_PATH):
     except Exception as e:
         print(f"[WARNING] Failed to load ONNX model: {e}")
 
+# Initialize lightweight ONNX scene-text OCR engine (~30 MB RAM on CPU)
+ocr_engine = RapidOCR()
+
+DIGIT_TO_LETTER = {"0": "O", "1": "I", "2": "Z", "5": "S", "8": "B", "6": "G"}
+LETTER_TO_DIGIT = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8", "G": "6"}
+
 
 def encode_image_base64(img: np.ndarray) -> str:
     """Fast JPEG base64 encoding for UI pipeline stage inspection."""
     _, buffer = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     b64_str = base64.b64encode(buffer).decode("utf-8")
     return f"data:image/jpeg;base64,{b64_str}"
+
+
+def refine_indian_plate_syntax(raw_text: str) -> str:
+    """Applies positional character correction for Indian HSRP/RTO formats (SS DD LL DDDD)."""
+    cleaned = re.sub(r"[^A-Z0-9]", "", raw_text.upper())
+    if cleaned.startswith("IND") and len(cleaned) >= 11:
+        cleaned = cleaned[3:]
+
+    # Standard 10-character Indian plate: SS DD LL DDDD (e.g., HR51AB1234)
+    if len(cleaned) == 10:
+        chars = list(cleaned)
+        for i in (0, 1):
+            chars[i] = DIGIT_TO_LETTER.get(chars[i], chars[i])
+        for i in (2, 3):
+            chars[i] = LETTER_TO_DIGIT.get(chars[i], chars[i])
+        for i in (4, 5):
+            chars[i] = DIGIT_TO_LETTER.get(chars[i], chars[i])
+        for i in (6, 7, 8, 9):
+            chars[i] = LETTER_TO_DIGIT.get(chars[i], chars[i])
+        return "".join(chars)
+
+    # 9-character format (single-letter series, e.g., DL8CAF503 -> 9 chars)
+    if len(cleaned) == 9:
+        chars = list(cleaned)
+        for i in (0, 1):
+            chars[i] = DIGIT_TO_LETTER.get(chars[i], chars[i])
+        for i in (2, 3):
+            chars[i] = LETTER_TO_DIGIT.get(chars[i], chars[i])
+        chars[4] = DIGIT_TO_LETTER.get(chars[4], chars[4])
+        for i in (5, 6, 7, 8):
+            chars[i] = LETTER_TO_DIGIT.get(chars[i], chars[i])
+        return "".join(chars)
+
+    return cleaned
 
 
 def deskew_binary_plate(binary: np.ndarray) -> np.ndarray:
@@ -56,8 +91,31 @@ def deskew_binary_plate(binary: np.ndarray) -> np.ndarray:
     )
 
 
+def _extract_rapidocr_tokens(img_bgr: np.ndarray) -> tuple[str, float]:
+    """Run RapidOCR on a BGR image and merge 1-line or 2-line tokens top-to-bottom, left-to-right."""
+    result, _ = ocr_engine(img_bgr)
+    if not result:
+        return "", 0.0
+
+    # Group rows vertically (within 22px band) and sort left-to-right within each row
+    sorted_boxes = sorted(result, key=lambda item: (int(item[0][0][1]) // 22, int(item[0][0][0])))
+
+    tokens = []
+    confs = []
+    for _, text, conf in sorted_boxes:
+        clean_tok = re.sub(r"[^A-Z0-9]", "", text.upper())
+        if not clean_tok or clean_tok == "IND" or float(conf) < 0.40:
+            continue
+        tokens.append(clean_tok)
+        confs.append(float(conf))
+
+    combined = "".join(tokens)
+    mean_conf = float(np.mean(confs)) if confs else 0.0
+    return combined, mean_conf
+
+
 def read_plate_ocr(gray_crop: np.ndarray) -> tuple[str, np.ndarray]:
-    """DIP Post-Processing: Scale-Normalized Bicubic Resize + Adaptive Threshold + Border/Emblem Removal + Deskew."""
+    """DIP Post-Processing + RapidOCR Neural Scene-Text Recognition + Indian RTO Syntax Refinement."""
     h_in, w_in = gray_crop.shape[:2]
     target_h = 110
     scale = max(1.0, target_h / float(h_in))
@@ -108,20 +166,27 @@ def read_plate_ocr(gray_crop: np.ndarray) -> tuple[str, np.ndarray]:
 
     deskewed = deskew_binary_plate(cv2.bitwise_not(cleaned_inv))
 
-    # Stretch slightly horizontally (1.25x) so narrow perspective-angled digits ('19', 'V') separate cleanly
     widened = cv2.resize(deskewed, None, fx=1.25, fy=1.0, interpolation=cv2.INTER_CUBIC)
     _, widened = cv2.threshold(widened, 127, 255, cv2.THRESH_BINARY)
     padded_preview = cv2.copyMakeBorder(widened, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
 
-    custom_config = (
-        r"--oem 3 --psm 7 "
-        r"-c load_system_dawg=0 "
-        r"-c load_freq_dawg=0 "
-        r"-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    )
-    raw_text = pytesseract.image_to_string(padded_preview, config=custom_config)
-    cleaned = "".join(ch for ch in raw_text if ch.isalnum())
-    return cleaned, padded_preview
+    # Pass 1: Run RapidOCR on CLAHE-enhanced natural grayscale crop (preserves real-world stroke detail & 2-line plates)
+    enhanced_padded = cv2.copyMakeBorder(enhanced_crop, 16, 16, 16, 16, cv2.BORDER_REPLICATE)
+    text_gray, conf_gray = _extract_rapidocr_tokens(cv2.cvtColor(enhanced_padded, cv2.COLOR_GRAY2BGR))
+
+    # Pass 2: Run RapidOCR on deskewed, border-cleaned binary ROI
+    text_bin, conf_bin = _extract_rapidocr_tokens(cv2.cvtColor(padded_preview, cv2.COLOR_GRAY2BGR))
+
+    # Select candidate with plausible plate length (8-10 chars) and highest confidence
+    best_raw = text_gray
+    if (8 <= len(text_bin) <= 10) and not (8 <= len(text_gray) <= 10):
+        best_raw = text_bin
+    elif len(text_bin) > len(text_gray) and conf_bin >= conf_gray:
+        best_raw = text_bin
+
+    refined = refine_indian_plate_syntax(best_raw)
+    return refined, padded_preview
+
 
 def detect_with_onnx(image: np.ndarray, conf_threshold: float = 0.30) -> tuple[int, int, int, int] | None:
     """Run unified Global + Indian YOLOv8n ONNX detector via ONNX Runtime (~20ms on CPU)."""
