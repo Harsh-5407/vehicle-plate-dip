@@ -1,7 +1,9 @@
 import React, { useState } from "react";
 import { Upload, Cpu, CheckCircle2, AlertCircle, Clock, Layers, Image as ImageIcon } from "lucide-react";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const API_BASE_URL = (
+  import.meta.env.VITE_API_URL || "https://vehicle-plate-ehyg.onrender.com"
+).replace(/\/$/, "");
 
 const SAMPLE_PRESETS = [
   {
@@ -77,7 +79,7 @@ export default function App() {
 
     const t0 = performance.now();
     try {
-      const response = await fetch(`${API_BASE_URL}/detect`, {
+      const response = await fetch(`${API_BASE_URL}/api/detect-plate`, {
         method: "POST",
         body: formData,
       });
@@ -85,7 +87,8 @@ export default function App() {
         throw new Error(`Server responded with ${response.status}`);
       }
       const data = await response.json();
-      setLatencyMs((performance.now() - t0).toFixed(2));
+      const roundTripMs = (performance.now() - t0).toFixed(2);
+      setLatencyMs(data.processing_time_ms ? `${data.processing_time_ms}` : roundTripMs);
       setResult(data);
     } catch (err) {
       setError(err.message || "Failed to process image. Check backend connection.");
