@@ -1,206 +1,342 @@
-import { useState } from "react";
-import { Upload, Cpu, CheckCircle2, AlertCircle, Image as ImageIcon, Layers, Clock } from "lucide-react";
+import React, { useState } from "react";
+import { Upload, Cpu, CheckCircle2, AlertCircle, Clock, Layers, Image as ImageIcon } from "lucide-react";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-const STAGE_META = [
-  { key: "original", title: "1. Input Acquisition", desc: "Resized RGB source frame" },
-  { key: "enhanced_gray", title: "2. Bilateral + CLAHE", desc: "Edge-preserving denoising & contrast boost" },
-  { key: "canny_edges", title: "3. Canny Edge Map", desc: "High-gradient boundary extraction" },
-  { key: "morph_mask", title: "4. Morphological Closing", desc: "Rectangular kernel (17×5) character fusion" },
-  { key: "localized", title: "5. Contour Localization", desc: "Aspect-ratio filtered bounding box" },
-  { key: "binarized_plate", title: "6. Otsu Binarization", desc: "Thresholded ROI fed to Tesseract OCR" },
+const SAMPLE_PRESETS = [
+  {
+    id: "hsrp",
+    label: "Indian HSRP Close-Up",
+    tag: "RJ14CV0002",
+    src: "/samples/sample_hsrp.jpg",
+  },
+  {
+    id: "yellow",
+    label: "Commercial Yellow Plate",
+    tag: "MH12DE4567",
+    src: "/samples/sample_yellow.jpg",
+  },
+  {
+    id: "cctv",
+    label: "CCTV Gate Wide-Angle",
+    tag: "LB19RKV",
+    src: "/samples/sample_cctv.jpg",
+  },
+];
+
+const DIP_STAGES_META = [
+  {
+    key: "original",
+    title: "1. Input Acquisition",
+    subtitle: "Aspect-preserved frame normalization (max 1280px)",
+  },
+  {
+    key: "enhanced_gray",
+    title: "2. Bilateral + CLAHE",
+    subtitle: "Edge-preserving denoising & adaptive contrast boost",
+  },
+  {
+    key: "canny_edges",
+    title: "3. Blackhat + Sobel-X",
+    subtitle: "High-gradient vertical stroke boundary extraction",
+  },
+  {
+    key: "morph_mask",
+    title: "4. Morphological Closing",
+    subtitle: "Rectangular kernel (19×5) candidate mask fusion",
+  },
+  {
+    key: "localized",
+    title: "5. ONNX Localization",
+    subtitle: "YOLOv8n bounding-box detection & NMS filtering",
+  },
+  {
+    key: "binarized_plate",
+    title: "6. Segmented & Binarized ROI",
+    subtitle: "Deskewed, border-cleaned crop fed to Tesseract OCR",
+  },
 ];
 
 export default function App() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [result, setResult] = useState(null);
+  const [latencyMs, setLatencyMs] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [activeSample, setActiveSample] = useState(null);
+
+  const runDetection = async (fileToProcess) => {
+    if (!fileToProcess) return;
+    setLoading(true);
+    setError("");
+    setResult(null);
+
+    const formData = new FormData();
+    formData.append("file", fileToProcess);
+
+    const t0 = performance.now();
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/detect`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) {
+        throw new Error(`Server responded with ${response.status}`);
+      }
+      const data = await response.json();
+      setLatencyMs((performance.now() - t0).toFixed(2));
+      setResult(data);
+    } catch (err) {
+      setError(err.message || "Failed to process image. Check backend connection.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setActiveSample(null);
     setSelectedFile(file);
     setPreviewUrl(URL.createObjectURL(file));
     setResult(null);
     setError("");
   };
 
-  const handleAnalyze = async () => {
-    if (!selectedFile) return;
-    setLoading(true);
-    setError("");
-
-    const formData = new FormData();
-    formData.append("file", selectedFile);
-
+  const handleSampleClick = async (sample) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/detect-plate`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.detail || "Failed to process image.");
-      }
-      setResult(data);
-    } catch (err) {
-      setError(err.message || "Could not connect to the DIP backend server.");
-    } finally {
-      setLoading(false);
+      setActiveSample(sample.id);
+      setError("");
+      setPreviewUrl(sample.src);
+
+      const response = await fetch(sample.src);
+      const blob = await response.blob();
+      const file = new File([blob], `${sample.id}.jpg`, { type: "image/jpeg" });
+      setSelectedFile(file);
+      await runDetection(file);
+    } catch {
+      setError("Could not load sample image.");
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
-      {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-900/70 backdrop-blur sticky top-0 z-10">
+    <div className="min-h-screen bg-[#070B14] text-slate-100 font-sans">
+      {/* Top Navbar */}
+      <header className="border-b border-slate-800/80 bg-[#0B1120]/90 backdrop-blur sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-indigo-600 rounded-lg">
-              <Cpu className="w-6 h-6 text-white" />
+            <div className="p-2 rounded-lg bg-indigo-600/20 border border-indigo-500/30 text-indigo-400">
+              <Cpu className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-lg font-bold tracking-tight">VisionPlate DIP</h1>
-              <p className="text-xs text-slate-400">Automated License Plate Detection & Character Extraction</p>
+              <h1 className="text-lg font-bold tracking-tight text-white">VisionPlate DIP</h1>
+              <p className="text-xs text-slate-400">
+                Automated License Plate Detection &amp; Character Extraction
+              </p>
             </div>
           </div>
-          <span className="text-xs font-medium px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-            OpenCV + Tesseract Engine
+          <span className="text-xs font-medium px-3 py-1.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            ONNX + OpenCV + Tesseract Engine
           </span>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
-        {/* Top Section: Upload & Extracted Result */}
+        {/* Top Two-Column Workspace */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Upload Card */}
-          <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between">
+          {/* Left Panel: Upload Dropzone & Sample Presets */}
+          <section className="lg:col-span-7 bg-[#0D1322] border border-slate-800/90 rounded-2xl p-6 flex flex-col justify-between">
             <div>
-              <h2 className="text-base font-semibold mb-1 flex items-center gap-2">
-                <Upload className="w-4 h-4 text-indigo-400" /> Vehicle Image Input
-              </h2>
+              <div className="flex items-center gap-2 text-slate-200 font-semibold mb-1">
+                <Upload className="w-4 h-4 text-indigo-400" />
+                <h2>Vehicle Image Input</h2>
+              </div>
               <p className="text-xs text-slate-400 mb-4">
-                Upload a front or rear vehicle image (JPG, PNG, WEBP) to inspect the 6-stage DIP pipeline.
+                Upload a front or rear vehicle image (JPG, PNG, WEBP) or click a preset below to inspect the 6-stage DIP pipeline.
               </p>
 
-              <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-700 hover:border-indigo-500 rounded-xl p-6 cursor-pointer transition bg-slate-950/50">
+              {/* Dropzone */}
+              <label className="block border-2 border-dashed border-slate-700/80 hover:border-indigo-500/60 transition rounded-xl p-6 text-center cursor-pointer bg-[#090E1A]">
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
                 {previewUrl ? (
-                  <img src={previewUrl} alt="Preview" className="max-h-64 rounded-lg object-contain" />
+                  <img
+                    src={previewUrl}
+                    alt="Selected vehicle"
+                    className="max-h-64 mx-auto rounded-lg object-contain shadow-md"
+                  />
                 ) : (
-                  <div className="text-center py-6">
-                    <ImageIcon className="w-10 h-10 text-slate-500 mx-auto mb-2" />
-                    <p className="text-sm font-medium text-slate-300">Click to select a vehicle image</p>
-                    <p className="text-xs text-slate-500 mt-1">Supports standard high-res or low-light plates</p>
+                  <div className="py-12 space-y-2">
+                    <ImageIcon className="w-10 h-10 mx-auto text-slate-500" />
+                    <p className="text-sm font-medium text-slate-300">
+                      Click to browse or drop vehicle image here
+                    </p>
+                    <p className="text-xs text-slate-500">Supports high-res close-ups &amp; wide-angle CCTV frames</p>
                   </div>
                 )}
-                <input type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
               </label>
+
+              {/* Clickable Sample Images Row */}
+              <div className="mt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-medium text-slate-400">
+                    Quick Test Samples (One-Click Demo):
+                  </span>
+                  <span className="text-[11px] text-slate-500">No vehicle photo handy? Try these</span>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  {SAMPLE_PRESETS.map((sample) => {
+                    const isSelected = activeSample === sample.id;
+                    return (
+                      <button
+                        key={sample.id}
+                        type="button"
+                        onClick={() => handleSampleClick(sample)}
+                        disabled={loading}
+                        className={`group text-left rounded-xl p-2 border transition bg-[#090E1A] hover:border-indigo-500/70 ${
+                          isSelected
+                            ? "border-indigo-500 ring-1 ring-indigo-500/40"
+                            : "border-slate-800"
+                        }`}
+                      >
+                        <div className="h-14 w-full overflow-hidden rounded-lg bg-slate-900 mb-1.5">
+                          <img
+                            src={sample.src}
+                            alt={sample.label}
+                            className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
+                          />
+                        </div>
+                        <p className="text-[11px] font-semibold text-slate-200 truncate">
+                          {sample.label}
+                        </p>
+                        <p className="text-[10px] font-mono text-indigo-400">{sample.tag}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
 
             <button
-              onClick={handleAnalyze}
+              type="button"
+              onClick={() => runDetection(selectedFile)}
               disabled={!selectedFile || loading}
-              className="mt-5 w-full py-3 px-4 rounded-xl font-semibold text-sm bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 transition cursor-pointer"
+              className="mt-5 w-full py-3 rounded-xl font-semibold text-sm bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 transition shadow-lg shadow-indigo-600/20"
             >
-              {loading ? "Running DIP Pipeline..." : "Detect & Extract License Plate"}
+              {loading ? "Running 6-Stage DIP & ONNX Pipeline..." : "Detect & Extract License Plate"}
             </button>
-          </div>
+          </section>
 
-          {/* Recognition Output Card */}
-          <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between">
+          {/* Right Panel: Extraction Telemetry */}
+          <section className="lg:col-span-5 bg-[#0D1322] border border-slate-800/90 rounded-2xl p-6 flex flex-col justify-between">
             <div>
-              <h2 className="text-base font-semibold mb-1">Extraction Telemetry</h2>
-              <p className="text-xs text-slate-400 mb-6">Real-time localization & OCR readout</p>
+              <h2 className="text-slate-200 font-semibold mb-1">Extraction Telemetry</h2>
+              <p className="text-xs text-slate-400 mb-5">Real-time localization &amp; OCR readout</p>
 
               {error && (
-                <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm flex items-start gap-2">
-                  <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+                <div className="mb-4 p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{error}</span>
                 </div>
               )}
 
-              {!result && !error && (
-                <div className="h-48 rounded-xl border border-slate-800 bg-slate-950/40 flex items-center justify-center text-sm text-slate-500">
-                  Awaiting image analysis...
+              {/* Recognized Plate Banner */}
+              <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-5 text-center mb-4">
+                <p className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
+                  Recognized License Plate
+                </p>
+                <div className="inline-block px-6 py-2.5 rounded-lg bg-amber-400 text-slate-950 font-mono font-extrabold text-2xl tracking-wider shadow">
+                  {result ? result.plate_number : "— — — —"}
                 </div>
-              )}
+              </div>
 
-              {result && (
-                <div className="space-y-5">
-                  {/* License Plate Badge */}
-                  <div className="p-5 rounded-xl bg-slate-950 border border-slate-800 text-center">
-                    <span className="text-[11px] uppercase tracking-widest text-slate-400 block mb-2">
-                      Recognized License Plate
-                    </span>
-                    <div className="inline-block px-6 py-2.5 rounded-lg bg-amber-400 text-slate-950 font-mono font-extrabold text-2xl tracking-widest border-2 border-slate-900 shadow-md">
-                      {result.plate_number}
-                    </div>
-                  </div>
-
-                  {/* Cropped Binarized Plate */}
-                  {result.detected && (
-                    <div className="p-4 rounded-xl bg-slate-950 border border-slate-800">
-                      <span className="text-xs text-slate-400 block mb-2">Segmented & Binarized ROI</span>
-                      <img
-                        src={result.stages.binarized_plate}
-                        alt="Binarized Plate"
-                        className="h-14 mx-auto rounded border border-slate-700 object-contain bg-white"
-                      />
-                    </div>
+              {/* Segmented & Binarized ROI Preview */}
+              <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-4 mb-4">
+                <p className="text-xs text-slate-400 mb-2">Segmented &amp; Binarized ROI</p>
+                <div className="h-24 rounded-lg bg-slate-950/80 border border-slate-800/80 flex items-center justify-center overflow-hidden p-2">
+                  {result?.stages?.binarized_plate ? (
+                    <img
+                      src={result.stages.binarized_plate}
+                      alt="Binarized ROI"
+                      className="max-h-full max-w-full object-contain rounded"
+                    />
+                  ) : (
+                    <span className="text-xs text-slate-600">Awaiting plate segmentation</span>
                   )}
-
-                  {/* Metrics */}
-                  <div className="grid grid-cols-2 gap-3 text-xs">
-                    <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center gap-2.5">
-                      <CheckCircle2 className={`w-4 h-4 ${result.detected ? "text-emerald-400" : "text-amber-400"}`} />
-                      <div>
-                        <p className="text-slate-400">Contour Status</p>
-                        <p className="font-semibold text-slate-200">
-                          {result.detected ? "Plate Localized" : "Not Found"}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center gap-2.5">
-                      <Clock className="w-4 h-4 text-indigo-400" />
-                      <div>
-                        <p className="text-slate-400">Pipeline Latency</p>
-                        <p className="font-semibold text-slate-200">{result.processing_time_ms} ms</p>
-                      </div>
-                    </div>
-                  </div>
                 </div>
-              )}
+              </div>
             </div>
-          </div>
+
+            {/* Status & Latency Footer */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-3.5 flex items-center gap-3">
+                <CheckCircle2
+                  className={`w-5 h-5 ${
+                    result?.detected ? "text-emerald-400" : "text-slate-600"
+                  }`}
+                />
+                <div>
+                  <p className="text-[11px] text-slate-400">Localization Status</p>
+                  <p className="text-xs font-semibold text-slate-200">
+                    {result ? (result.detected ? "Plate Localized" : "Not Detected") : "Idle"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-3.5 flex items-center gap-3">
+                <Clock className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <p className="text-[11px] text-slate-400">Pipeline Latency</p>
+                  <p className="text-xs font-semibold text-slate-200">
+                    {latencyMs ? `${latencyMs} ms` : "—"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
 
-        {/* Bottom Section: 6-Stage DIP Pipeline Inspector */}
-        {result && (
-          <section className="space-y-4">
-            <div className="flex items-center gap-2">
-              <Layers className="w-5 h-5 text-indigo-400" />
-              <h2 className="text-lg font-bold">Intermediate Digital Image Processing Stages</h2>
+        {/* Bottom Section: 6-Stage Intermediate DIP Pipeline Visual Gallery */}
+        {result?.stages && (
+          <section className="bg-[#0D1322] border border-slate-800/90 rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2">
+                <Layers className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <h2 className="text-base font-semibold text-white">
+                    Intermediate Digital Image Processing Stages
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Step-by-step computer vision feature maps generated during inference
+                  </p>
+                </div>
+              </div>
+              <span className="text-xs text-slate-400 hidden sm:inline">
+                6-Stage OpenCV + ONNX Pipeline
+              </span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-              {STAGE_META.map((stage) => (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+              {DIP_STAGES_META.map((stage) => (
                 <div
                   key={stage.key}
-                  className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col"
+                  className="bg-[#090E1A] border border-slate-800 rounded-xl p-3.5 flex flex-col justify-between"
                 >
-                  <div className="bg-slate-950 h-48 flex items-center justify-center p-2">
+                  <div className="h-44 w-full rounded-lg bg-slate-950 overflow-hidden flex items-center justify-center mb-3 border border-slate-800/60">
                     <img
                       src={result.stages[stage.key]}
                       alt={stage.title}
-                      className="max-h-full max-w-full object-contain rounded"
+                      className="max-h-full max-w-full object-contain"
                     />
                   </div>
-                  <div className="p-4 border-t border-slate-800">
-                    <h3 className="text-sm font-semibold text-slate-100">{stage.title}</h3>
-                    <p className="text-xs text-slate-400 mt-0.5">{stage.desc}</p>
+                  <div>
+                    <h3 className="text-xs font-semibold text-slate-100">{stage.title}</h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">{stage.subtitle}</p>
                   </div>
                 </div>
               ))}
