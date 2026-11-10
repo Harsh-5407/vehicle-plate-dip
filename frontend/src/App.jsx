@@ -77,7 +77,7 @@ export default function App() {
 
     const t0 = performance.now();
     try {
-      const response = await fetch(`${API_BASE_URL}/api/detect`, {
+      const response = await fetch(`${API_BASE_URL}/detect`, {
         method: "POST",
         body: formData,
       });
