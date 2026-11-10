@@ -19,6 +19,28 @@ def encode_image_base64(img: np.ndarray) -> str:
     return f"data:image/png;base64,{b64_str}"
 
 
+def read_plate_ocr(gray_crop: np.ndarray) -> tuple[str, np.ndarray]:
+    """Upscale, pad, Otsu-binarize, and extract alphanumeric characters via Tesseract."""
+    # Upscale 3x with Lanczos interpolation so small wide-angle plates become crisp
+    upscaled = cv2.resize(gray_crop, None, fx=3.0, fy=3.0, interpolation=cv2.INTER_LANCZOS4)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
+    upscaled = clahe.apply(upscaled)
+
+    _, binary = cv2.threshold(upscaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Ensure dark text on white background (Tesseract performs best on dark-on-light)
+    if np.mean(binary) < 127:
+        binary = cv2.bitwise_not(binary)
+
+    # Add white border padding so Tesseract doesn't clip edge characters
+    padded = cv2.copyMakeBorder(binary, 12, 12, 12, 12, cv2.BORDER_CONSTANT, value=255)
+
+    custom_config = r"--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    raw_text = pytesseract.image_to_string(padded, config=custom_config)
+    cleaned = "".join(ch for ch in raw_text if ch.isalnum())
+    return cleaned, padded
+
+
 def process_vehicle_image(image_bytes: bytes) -> dict:
     # 1. Decode uploaded image
     np_arr = np.frombuffer(image_bytes, np.uint8)
@@ -26,71 +48,104 @@ def process_vehicle_image(image_bytes: bytes) -> dict:
     if original is None:
         raise ValueError("Invalid image file.")
 
-    # Resize large images for consistent processing speed
+    # Keep higher resolution (1280px max width) so distant/wide-angle plates retain detail
     height, width = original.shape[:2]
-    if width > 1000:
-        scale = 1000 / width
-        original = cv2.resize(original, (1000, int(height * scale)))
+    if width > 1280:
+        scale = 1280 / width
+        original = cv2.resize(original, (1280, int(height * scale)))
 
-    # 2. Grayscale Conversion
+    # 2. Grayscale Conversion & Edge-Preserving Denoising + CLAHE
     gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
-
-    # 3. Noise Reduction (Bilateral Filter preserves edges) + CLAHE contrast boost
-    bilateral = cv2.bilateralFilter(gray, d=11, sigmaColor=17, sigmaSpace=17)
+    bilateral = cv2.bilateralFilter(gray, d=9, sigmaColor=15, sigmaSpace=15)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(bilateral)
 
-    # 4. Canny Edge Detection
-    edges = cv2.Canny(enhanced, threshold1=30, threshold2=200)
+    # 3. Blackhat Morphology + Vertical Sobel Gradient (isolates dark text on bright plates)
+    rect_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (13, 5))
+    blackhat = cv2.morphologyEx(enhanced, cv2.MORPH_BLACKHAT, rect_kern)
 
-    # 5. Morphological Closing to merge plate characters into a solid region
-    rect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 5))
-    morph = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, rect_kernel)
+    grad_x = cv2.Sobel(blackhat, ddepth=cv2.CV_32F, dx=1, dy=0, ksize=3)
+    grad_x = np.absolute(grad_x)
+    min_val, max_val = np.min(grad_x), np.max(grad_x)
+    if max_val - min_val > 0:
+        grad_x = (255 * ((grad_x - min_val) / (max_val - min_val))).astype("uint8")
+    else:
+        grad_x = grad_x.astype("uint8")
 
-    # 6. Contour Detection & Geometric Filtering (Aspect Ratio 2.0 - 5.5)
+    # 4. Gaussian Smooth + Otsu Threshold + Morphological Closing to fuse plate characters
+    grad_blur = cv2.GaussianBlur(grad_x, (5, 5), 0)
+    _, thresh = cv2.threshold(grad_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    close_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (19, 5))
+    morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, close_kern)
+    morph = cv2.erode(morph, None, iterations=1)
+    morph = cv2.dilate(morph, None, iterations=2)
+
+    # 5. Contour Detection & Geometric + OCR Candidate Verification
     contours, _ = cv2.findContours(morph.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:15]
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:120]
 
-    plate_box = None
-    plate_crop = None
-    annotated = original.copy()
+    best_box = None
+    best_text = ""
+    best_binarized = np.zeros((60, 200), dtype=np.uint8)
+    fallback_box = None
+    fallback_binarized = None
+
+    img_h, img_w = original.shape[:2]
 
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         aspect_ratio = w / float(h)
         area = w * h
 
-        if 2.0 <= aspect_ratio <= 5.5 and area > 1500:
-            plate_box = (x, y, w, h)
-            plate_crop = gray[y : y + h, x : x + w]
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 3)
-            break
+        # Ignore top 25% of frame (building signs/sky) and match plate geometry
+        if y < img_h * 0.25:
+            continue
 
-    # 7. Plate Binarization (Otsu's Thresholding) & OCR
-    extracted_text = "No plate detected"
-    binarized_plate = np.zeros((60, 200), dtype=np.uint8)
+        if 2.0 <= aspect_ratio <= 6.0 and 300 <= area <= (img_h * img_w * 0.25):
+            pad_x = int(w * 0.08)
+            pad_y = int(h * 0.15)
+            x1 = max(0, x - pad_x)
+            y1 = max(0, y - pad_y)
+            x2 = min(gray.shape[1], x + w + pad_x)
+            y2 = min(gray.shape[0], y + h + pad_y)
 
-    if plate_crop is not None:
-        # Upscale crop slightly for sharper Tesseract character recognition
-        plate_resized = cv2.resize(plate_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        _, binarized_plate = cv2.threshold(plate_resized, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            crop = gray[y1:y2, x1:x2]
+            text, bin_img = read_plate_ocr(crop)
 
-        # PSM 7 treats the image as a single text line; whitelist restricts to uppercase & digits
-        custom_config = r"--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        raw_text = pytesseract.image_to_string(binarized_plate, config=custom_config)
-        cleaned = "".join(ch for ch in raw_text if ch.isalnum())
-        if cleaned:
-            extracted_text = cleaned
+            if fallback_box is None:
+                fallback_box = (x1, y1, x2 - x1, y2 - y1)
+                fallback_binarized = bin_img
+
+            # Valid license plates contain 5 to 11 alphanumeric characters
+            if 5 <= len(text) <= 11:
+                best_box = (x1, y1, x2 - x1, y2 - y1)
+                best_text = text
+                best_binarized = bin_img
+                break
+
+    annotated = original.copy()
+    if best_box is not None:
+        bx, by, bw, bh = best_box
+        cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (0, 255, 0), 3)
+        extracted_text = best_text
+    elif fallback_box is not None:
+        bx, by, bw, bh = fallback_box
+        cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (0, 200, 255), 3)
+        extracted_text = "Plate region found (low OCR clarity)"
+        best_binarized = fallback_binarized
+    else:
+        extracted_text = "No plate detected"
 
     return {
         "plate_number": extracted_text,
-        "detected": plate_box is not None,
+        "detected": best_box is not None or fallback_box is not None,
         "stages": {
             "original": encode_image_base64(original),
             "enhanced_gray": encode_image_base64(enhanced),
-            "canny_edges": encode_image_base64(edges),
+            "canny_edges": encode_image_base64(grad_x),
             "morph_mask": encode_image_base64(morph),
             "localized": encode_image_base64(annotated),
-            "binarized_plate": encode_image_base64(binarized_plate),
+            "binarized_plate": encode_image_base64(best_binarized),
         },
     }
