@@ -5,7 +5,16 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+# ... existing imports ...
+from dip_pipeline import process_vehicle_image
+from dip_lab import (
+    analyze_image_quality,
+    run_parameter_tuning,
+    run_thresholding_lab,
+    run_edge_lab,
+    compute_image_histograms,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -186,6 +195,92 @@ async def detect_plate(file: UploadFile = File(...)):
     result["filename"] = file.filename
     return result
 
+# --- Phase 2: Interactive Digital Image Processing Laboratory Endpoints ---
+
+
+@app.post("/api/lab/quality")
+async def lab_quality_analyzer(file: UploadFile = File(...)):
+    try:
+        image_bytes = await file.read()
+        return analyze_image_quality(image_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        gc.collect()
+
+
+@app.post("/api/lab/tune")
+async def lab_parameter_tuner(
+    file: UploadFile = File(...),
+    clahe_clip: float = Form(2.0),
+    clahe_grid: int = Form(8),
+    bilateral_d: int = Form(5),
+    bilateral_sigma: int = Form(15),
+    binary_thresh: int = Form(127),
+    morph_w: int = Form(19),
+    morph_h: int = Form(5),
+):
+    try:
+        image_bytes = await file.read()
+        return run_parameter_tuning(
+            image_bytes,
+            clahe_clip=clahe_clip,
+            clahe_grid=clahe_grid,
+            bilateral_d=bilateral_d,
+            bilateral_sigma=bilateral_sigma,
+            binary_thresh=binary_thresh,
+            morph_w=morph_w,
+            morph_h=morph_h,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        gc.collect()
+
+
+@app.post("/api/lab/threshold")
+async def lab_threshold_comparison(
+    file: UploadFile = File(...),
+    global_thresh: int = Form(127),
+    adaptive_block: int = Form(31),
+):
+    try:
+        image_bytes = await file.read()
+        return run_thresholding_lab(image_bytes, global_thresh=global_thresh, adaptive_block=adaptive_block)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        gc.collect()
+
+
+@app.post("/api/lab/edges")
+async def lab_edge_comparison(
+    file: UploadFile = File(...),
+    sobel_ksize: int = Form(3),
+    canny_low: int = Form(80),
+    canny_high: int = Form(180),
+):
+    try:
+        image_bytes = await file.read()
+        return run_edge_lab(image_bytes, sobel_ksize=sobel_ksize, canny_low=canny_low, canny_high=canny_high)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        gc.collect()
+
+
+@app.post("/api/lab/histograms")
+async def lab_histograms(
+    file: UploadFile = File(...),
+    clahe_clip: float = Form(2.0),
+):
+    try:
+        image_bytes = await file.read()
+        return compute_image_histograms(image_bytes, clahe_clip=clahe_clip)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        gc.collect()
 
 @app.get("/api/registry")
 def list_registered_vehicles():

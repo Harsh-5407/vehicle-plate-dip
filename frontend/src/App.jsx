@@ -1,3 +1,4 @@
+import DipLaboratoryPage from "./pages/DipLaboratoryPage";
 import React, { useState, useEffect } from "react";
 import {
   LayoutDashboard,
@@ -18,7 +19,7 @@ import AboutTechniquesPage from "./pages/AboutTechniquesPage";
 const NAV_ITEMS = [
   { id: "overview", label: "Overview", icon: LayoutDashboard, badge: null },
   { id: "recognition", label: "Plate Recognition", icon: Cpu, badge: "Core" },
-  { id: "laboratory", label: "DIP Laboratory", icon: FlaskConical, badge: "Phase 2" },
+  { id: "laboratory", label: "DIP Laboratory", icon: FlaskConical, badge: "Interactive" },
   { id: "performance", label: "Performance Analysis", icon: BarChart3, badge: "Phase 3" },
   { id: "history", label: "Processing History", icon: History, badge: null },
   { id: "techniques", label: "About / DIP Techniques", icon: BookOpen, badge: null },
@@ -213,17 +214,7 @@ export default function App() {
             </div>
           )}
 
-          {activePage === "laboratory" && (
-            <div className="bg-[#0D1322] border border-cyan-500/30 rounded-2xl p-8 text-center space-y-2">
-              <FlaskConical className="w-8 h-8 text-cyan-400 mx-auto" />
-              <h2 className="text-lg font-bold text-white">DIP Experimentation Laboratory</h2>
-              <p className="text-xs text-slate-400 max-w-lg mx-auto">
-                Scheduled for <strong>Phase 2</strong>: Interactive CLAHE &amp; Bilateral parameter sliders,
-                5-way Thresholding Comparison (Global, Inverse, Otsu, Adaptive Mean/Gaussian),
-                4-way Edge Comparison (Sobel-X, Sobel-Y, Laplacian, Canny), and Before/After Intensity Histograms.
-              </p>
-            </div>
-          )}
+          {activePage === "laboratory" && <DipLaboratoryPage />}
 
           {activePage === "performance" && (
             <div className="bg-[#0D1322] border border-slate-800 rounded-2xl p-8 text-center space-y-2">
