@@ -1,0 +1,96 @@
+export const API_BASE_URL = (
+  import.meta.env.VITE_API_URL || "https://anpr-system-api.onrender.com"
+).replace(/\/$/, "");
+
+export const SAMPLE_PRESETS = [
+  {
+    id: "hsrp",
+    label: "Indian HSRP Close-Up",
+    condition: "Daylight • Clear Focus",
+    groundTruth: "RJ14CV0002",
+    src: "/samples/sample_hsrp.jpg",
+  },
+  {
+    id: "yellow",
+    label: "Commercial Yellow Plate",
+    condition: "Daylight • Commercial HSRP",
+    groundTruth: "MH12DE4567",
+    src: "/samples/sample_yellow.jpg",
+  },
+  {
+    id: "cctv",
+    label: "CCTV Gate Wide-Angle",
+    condition: "Wide-Angle • Distant ROI",
+    groundTruth: "LB19RKV",
+    src: "/samples/sample_cctv.jpg",
+  },
+];
+
+export const DIP_STAGES_META = [
+  {
+    key: "original",
+    stepNumber: 1,
+    title: "Input Acquisition & Normalization",
+    shortTitle: "1. Input Frame",
+    technique: "Aspect-Preserved Bilinear Resizing (Max Width 1280px)",
+    tooltip: "Normalizes high-resolution camera frames to a bounded width (≤1280px) so kernel sizes behave consistently.",
+    whatItDoes: "Decodes raw image bytes into a 3-channel BGR matrix and scales oversized images proportionally.",
+    whyUsed: "Prevents memory spikes and ensures fixed morphological kernels (13×5, 19×5) span consistent character stroke widths.",
+    whatChanges: "Spatial resolution is bounded while preserving aspect ratio and color fidelity.",
+  },
+  {
+    key: "enhanced_gray",
+    stepNumber: 2,
+    title: "Bilateral Filtering + CLAHE",
+    shortTitle: "2. Bilateral + CLAHE",
+    technique: "Edge-Preserving Bilateral Filter (d=5) + CLAHE (Clip=2.0, 8×8)",
+    tooltip: "CLAHE (Contrast Limited Adaptive Histogram Equalization) boosts local character contrast without amplifying flat-region noise.",
+    whatItDoes: "Converts BGR to luminance grayscale, smooths sensor noise via Bilateral filtering, and stretches local contrast via CLAHE.",
+    whyUsed: "Unlike Gaussian blur, Bilateral filtering preserves sharp character edges while CLAHE compensates for shadows and uneven lighting.",
+    whatChanges: "Background surface grain is suppressed while dark alphanumeric strokes stand out sharply against the plate background.",
+  },
+  {
+    key: "sobel_x_edges",
+    stepNumber: 3,
+    title: "Morphological Blackhat + Sobel-X",
+    shortTitle: "3. Blackhat + Sobel-X",
+    technique: "13×5 Rectangular Blackhat + First-Order Horizontal Derivative (Sobel-X, k=3)",
+    tooltip: "Sobel-X computes horizontal intensity gradients (∂I/∂x), highlighting vertical character strokes typical of license plates.",
+    whatItDoes: "Extracts dark characters on bright backgrounds using Blackhat morphology, then computes horizontal gradient magnitude via Sobel-X.",
+    whyUsed: "License plates exhibit dense clusters of vertical character edges; Sobel-X suppresses horizontal road lines and bumper edges.",
+    whatChanges: "Produces a high-contrast gradient map concentrated around alphanumeric character boundaries.",
+  },
+  {
+    key: "morph_mask",
+    stepNumber: 4,
+    title: "Otsu Thresholding & Morphological Closing",
+    shortTitle: "4. Morph Closing",
+    technique: "Gaussian Smoothing + Otsu Binarization + 19×5 Rectangular Closing",
+    tooltip: "Morphological Closing (Dilation followed by Erosion) bridges horizontal gaps between adjacent characters into a solid rectangular blob.",
+    whatItDoes: "Automatically selects a global threshold via Otsu's variance maximization and fuses adjacent character strokes using a 19×5 closing kernel.",
+    whyUsed: "Demonstrates classical DIP region-proposal grouping of disconnected characters into a contiguous candidate plate mask.",
+    whatChanges: "Individual vertical character edges merge into cohesive horizontal candidate bands.",
+  },
+  {
+    key: "localized",
+    stepNumber: 5,
+    title: "YOLOv8-Nano ONNX Localization",
+    shortTitle: "5. ONNX Localization",
+    technique: "640×640 Letterboxed YOLOv8n Inference + Non-Maximum Suppression (IoU 0.45)",
+    tooltip: "Runs quantized/CPU ONNX inference to predict exact bounding-box coordinates [x1, y1, x2, y2] with 4% boundary padding.",
+    whatItDoes: "Localizes the exact plate bounding box across multi-scale scenes and filters overlapping detections via NMS.",
+    whyUsed: "Handles oblique camera angles, wide CCTV frames, and complex backgrounds where pure contour heuristics can fail.",
+    whatChanges: "Draws the cyan localization bounding box and extracts exact spatial geometry (width, height, aspect ratio).",
+  },
+  {
+    key: "binarized_plate",
+    stepNumber: 6,
+    title: "ROI Segmentation, Deskew & RapidOCR",
+    shortTitle: "6. Segmented ROI",
+    technique: "Adaptive Gaussian Threshold + Connected-Component Filtering + MinAreaRect Deskew",
+    tooltip: "Removes outer plate borders, bolts, and 'IND' emblems via connected-component geometry before deskewing and running RapidOCR.",
+    whatItDoes: "Resizes the plate crop to 110px height, filters non-character blobs, corrects tilt angle, and runs dual-pass RapidOCR + RTO syntax rules.",
+    whyUsed: "Clean character isolation and perspective deskewing prevent border frames or rivets from being misread as '1' or 'I'.",
+    whatChanges: "Produces a crisp, upright, noise-free character strip and outputs the final registration string.",
+  },
+];
