@@ -1,3 +1,4 @@
+import gc
 import os
 import re
 import time
@@ -14,12 +15,19 @@ from dip_pipeline import process_vehicle_image
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("MONGO_DB_NAME", "visionplate_rto")
 
-client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+# Lightweight connection pool tuned for Render's 512 MB Free Tier
+client = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=5000,
+    maxPoolSize=1,
+    minPoolSize=0,
+    maxIdleTimeMS=30000,
+)
 db = client[DB_NAME]
 vehicles_col = db["vehicles"]
 challans_col = db["challan_logs"]
 
-# 50 realistic Indian RTO citizen records (first 5 match scanner demo & real test plates)
+# 50 realistic Indian RTO citizen records
 SEED_VEHICLES = [
     ("HR26BR9044", "Vikramaditya Sharma", "+91-98114-72910", "House 412, Sector 15, Gurugram, Haryana", "Mini Cooper S (Red)"),
     ("RJ14CV0002", "Ananya Rathore", "+91-94140-58321", "B-28, C-Scheme, Jaipur, Rajasthan", "Kia Seltos HTX (White)"),
@@ -114,7 +122,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Vehicle License Plate DIP & RTO Enforcement Platform",
     description="Digital Image Processing ANPR pipeline with MongoDB RTO Registry, Traffic Violation E-Challan Dispatch & Police Lookup.",
-    version="2.1.0",
+    version="2.1.1",
     lifespan=lifespan,
 )
 
@@ -170,14 +178,13 @@ async def detect_plate(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Image processing failed: {str(e)}")
+    finally:
+        gc.collect()
 
     elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
     result["processing_time_ms"] = elapsed_ms
     result["filename"] = file.filename
     return result
-
-
-# --- Feature 2: MongoDB Vehicle Owner Registry & Enforcement Endpoints ---
 
 
 @app.get("/api/registry")
