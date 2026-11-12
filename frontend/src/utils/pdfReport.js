@@ -1,0 +1,152 @@
+import { jsPDF } from "jspdf";
+import { DIP_STAGES_META } from "../constants/dipData";
+
+export function exportProcessingReportPDF({
+  result,
+  filename = "vehicle_sample.jpg",
+  groundTruth = "",
+  selectedDetection = null,
+}) {
+  if (!result) return;
+
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  const activeDet = selectedDetection || result.detections?.[0] || null;
+  const plateStr = activeDet?.plate_number || result.plate_number || "N/A";
+  const detConf = activeDet?.detection_confidence ?? result.detection_confidence;
+  const ocrConf = activeDet?.ocr_confidence ?? result.ocr_confidence;
+  const geom = activeDet?.geometry || result.geometry;
+
+  // Header Banner
+  doc.setFillColor(11, 17, 32);
+  doc.rect(0, 0, 210, 32, "F");
+  doc.setTextColor(34, 211, 238);
+  doc.setFontSize(10);
+  doc.setFont("helvetica", "bold");
+  doc.text("VISIONPLATE DIP • 5TH-SEMESTER DIGITAL IMAGE PROCESSING LAB REPORT", 14, 11);
+
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(15);
+  doc.text("Automated License Plate Detection & OCR Run Report", 14, 20);
+
+  doc.setTextColor(148, 163, 184);
+  doc.setFontSize(8.5);
+  doc.setFont("helvetica", "normal");
+  doc.text(`Generated: ${new Date().toLocaleString()}   |   Input File: ${filename}`, 14, 27);
+
+  // Section 1: Recognition Summary & Telemetry
+  let y = 40;
+  doc.setTextColor(15, 23, 42);
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.text("1. Recognition Readout & Measured Telemetry", 14, y);
+  y += 6;
+
+  doc.setFontSize(9.5);
+  doc.setFont("helvetica", "normal");
+  const rows = [
+    ["Recognized Plate String:", plateStr],
+    ["Raw RapidOCR Output:", activeDet?.raw_ocr_text || result.raw_ocr_text || "—"],
+    ["Plates Localized in Frame:", `${result.plate_count ?? (result.detected ? 1 : 0)}`],
+    [
+      "YOLOv8n Detector Confidence:",
+      detConf != null ? `${(detConf * 100).toFixed(1)}%` : "Not exposed / N/A",
+    ],
+    [
+      "RapidOCR String Confidence:",
+      ocrConf != null ? `${(ocrConf * 100).toFixed(1)}%` : "Not exposed / N/A",
+    ],
+    [
+      "Backend Compute Latency:",
+      result.pipeline_compute_ms != null ? `${result.pipeline_compute_ms} ms (excludes network upload)` : "—",
+    ],
+    [
+      "Bounding-Box Geometry:",
+      geom
+        ? `[${geom.bbox.join(", ")}] • ${geom.width}×${geom.height}px (${geom.aspect_ratio}:1) • Deskew: ${geom.deskew_angle_deg}°`
+        : "No bounding box localized",
+    ],
+  ];
+
+  const cleanGT = groundTruth.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  const cleanPred = plateStr.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  if (cleanGT) {
+    const maxLen = Math.max(cleanGT.length, cleanPred.length, 1);
+    let matches = 0;
+    for (let i = 0; i < Math.min(cleanGT.length, cleanPred.length); i++) {
+      if (cleanGT[i] === cleanPred[i]) matches++;
+    }
+    const acc = ((matches / maxLen) * 100).toFixed(1);
+    rows.push(["Evaluator Ground Truth:", `${cleanGT} (${matches}/${maxLen} chars = ${acc}% accuracy)`]);
+  }
+
+  rows.forEach(([label, val]) => {
+    doc.setFont("helvetica", "bold");
+    doc.text(label, 14, y);
+    doc.setFont("helvetica", "normal");
+    doc.text(String(val), 74, y);
+    y += 5.5;
+  });
+
+  // Section 2: Segmented Plate Crop Preview
+  const cropImg = activeDet?.binarized_crop_base64 || result.stages?.binarized_plate;
+  if (cropImg && cropImg.startsWith("data:image/")) {
+    y += 2;
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    doc.text("2. Segmented, Deskewed & Binarized Plate ROI", 14, y);
+    y += 4;
+    try {
+      doc.addImage(cropImg, "JPEG", 14, y, 64, 22);
+      y += 27;
+    } catch {
+      y += 4;
+    }
+  }
+
+  // Section 3: Six Intermediate DIP Stages Grid (2 columns x 3 rows)
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11);
+  doc.text("3. Six-Stage Digital Image Processing Pipeline Outputs", 14, y);
+  y += 5;
+
+  const cardW = 88;
+  const imgH = 34;
+  DIP_STAGES_META.forEach((stage, index) => {
+    const col = index % 2;
+    const row = Math.floor(index / 2);
+    const xPos = 14 + col * 94;
+    const yPos = y + row * 48;
+
+    const stageImg = result.stages?.[stage.key];
+    const stageTime = result.stage_timings_ms?.[stage.key];
+
+    doc.setDrawColor(203, 213, 225);
+    doc.rect(xPos, yPos, cardW, 44);
+
+    if (stageImg && stageImg.startsWith("data:image/")) {
+      try {
+        doc.addImage(stageImg, "JPEG", xPos + 2, yPos + 2, cardW - 4, imgH);
+      } catch {
+        // skip image if invalid
+      }
+    }
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${stage.shortTitle} (${stageTime != null ? `${stageTime} ms` : "—"})`, xPos + 2, yPos + 40);
+  });
+
+  // Footer Disclaimer
+  doc.setFont("helvetica", "italic");
+  doc.setFontSize(7.5);
+  doc.setTextColor(100, 116, 139);
+  doc.text(
+    "Academic Demonstration Disclaimer: Generated by VisionPlate DIP for educational evaluation. Verify OCR results manually before real-world use.",
+    14,
+    289
+  );
+
+  const safeName = plateStr.replace(/[^A-Z0-9]/gi, "_") || "run";
+  doc.save(`VisionPlate_DIP_Report_${safeName}.pdf`);
+}

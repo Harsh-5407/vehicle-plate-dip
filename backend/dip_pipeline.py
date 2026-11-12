@@ -26,8 +26,7 @@ if os.path.exists(MODEL_PATH):
     except Exception as e:
         print(f"[WARNING] Failed to load ONNX model: {e}")
 
-# Load ONLY the CRNN text-recognition model (~25 MB RAM instead of ~240 MB full 3-model suite)
-# since YOLOv8n already localizes the license plate bounding box.
+# Load ONLY the CRNN text-recognition model (~25 MB RAM)
 try:
     ocr_engine = RapidOCR(use_det=False, use_cls=False, use_rec=True)
 except TypeError:
@@ -50,7 +49,6 @@ def refine_indian_plate_syntax(raw_text: str) -> str:
     if cleaned.startswith("IND") and len(cleaned) >= 11:
         cleaned = cleaned[3:]
 
-    # Standard 10-character Indian plate: SS DD LL DDDD (e.g., HR51AB1234)
     if len(cleaned) == 10:
         chars = list(cleaned)
         for i in (0, 1):
@@ -63,7 +61,6 @@ def refine_indian_plate_syntax(raw_text: str) -> str:
             chars[i] = LETTER_TO_DIGIT.get(chars[i], chars[i])
         return "".join(chars)
 
-    # 9-character format (single-letter series, e.g., DL8CAF503 -> 9 chars)
     if len(cleaned) == 9:
         chars = list(cleaned)
         for i in (0, 1):
@@ -106,12 +103,11 @@ def deskew_binary_plate(binary: np.ndarray) -> tuple[np.ndarray, float]:
 
 
 def _extract_rapidocr_tokens(img_bgr: np.ndarray) -> tuple[str, float]:
-    """Run RapidOCR on a cropped plate image (supports both rec-only and full modes)."""
+    """Run RapidOCR on a cropped plate image."""
     result, _ = ocr_engine(img_bgr)
     if not result:
         return "", 0.0
 
-    # Format A: rec-only mode returns [('HR26BR9044', 0.985), ...]
     if isinstance(result[0], (list, tuple)) and len(result[0]) == 2 and isinstance(result[0][0], str):
         tokens = []
         confs = []
@@ -125,7 +121,6 @@ def _extract_rapidocr_tokens(img_bgr: np.ndarray) -> tuple[str, float]:
         mean_conf = float(np.mean(confs)) if confs else 0.0
         return combined, mean_conf
 
-    # Format B: full det+rec mode returns [[box, text, conf], ...]
     sorted_boxes = sorted(result, key=lambda item: (int(item[0][0][1]) // 22, int(item[0][0][0])))
     tokens = []
     confs = []
@@ -142,10 +137,7 @@ def _extract_rapidocr_tokens(img_bgr: np.ndarray) -> tuple[str, float]:
 
 
 def read_plate_ocr(gray_crop: np.ndarray) -> tuple[str, str, float | None, float, np.ndarray, np.ndarray]:
-    """
-    DIP Post-Processing + RapidOCR Scene-Text Recognition + Indian RTO Syntax Refinement.
-    Returns: (refined_text, raw_ocr_text, ocr_confidence, deskew_angle_deg, enhanced_crop_bgr, binarized_preview)
-    """
+    """DIP Post-Processing + RapidOCR Scene-Text Recognition + Indian RTO Syntax Refinement."""
     h_in, w_in = gray_crop.shape[:2]
     target_h = 110
     scale = max(1.0, target_h / float(h_in))
@@ -170,7 +162,6 @@ def read_plate_ocr(gray_crop: np.ndarray) -> tuple[str, str, float | None, float
     if float(np.mean(binary)) < 127.0:
         binary = cv2.bitwise_not(binary)
 
-    # Connected-component analysis to filter outer plate frames, bolts, and 'IND' emblem
     inv = cv2.bitwise_not(binary)
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
     h, w = inv.shape
@@ -200,11 +191,9 @@ def read_plate_ocr(gray_crop: np.ndarray) -> tuple[str, str, float | None, float
     _, widened = cv2.threshold(widened, 127, 255, cv2.THRESH_BINARY)
     padded_preview = cv2.copyMakeBorder(widened, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=255)
 
-    # Pass 1: Run RapidOCR on CLAHE-enhanced natural grayscale crop
     enhanced_padded = cv2.copyMakeBorder(enhanced_crop, 16, 16, 16, 16, cv2.BORDER_REPLICATE)
     text_gray, conf_gray = _extract_rapidocr_tokens(cv2.cvtColor(enhanced_padded, cv2.COLOR_GRAY2BGR))
 
-    # Pass 2: Run RapidOCR on deskewed, border-cleaned binary ROI
     text_bin, conf_bin = _extract_rapidocr_tokens(cv2.cvtColor(padded_preview, cv2.COLOR_GRAY2BGR))
 
     best_raw = text_gray
@@ -221,10 +210,17 @@ def read_plate_ocr(gray_crop: np.ndarray) -> tuple[str, str, float | None, float
     return refined, best_raw, honest_conf, angle_deg, enhanced_crop, padded_preview
 
 
-def detect_with_onnx(image: np.ndarray, conf_threshold: float = 0.30) -> tuple[int, int, int, int, float] | None:
-    """Run YOLOv8n ONNX detector via ONNX Runtime and return (bx, by, bw, bh, detection_confidence)."""
+def detect_all_plates_onnx(
+    image: np.ndarray,
+    conf_threshold: float = 0.30,
+    max_plates: int = 5,
+) -> list[tuple[int, int, int, int, float]]:
+    """
+    Run YOLOv8n ONNX detector via ONNX Runtime and return all NMS-filtered plates
+    sorted by confidence descending (up to max_plates).
+    """
     if ort_session is None or INPUT_NAME is None:
-        return None
+        return []
 
     orig_h, orig_w = image.shape[:2]
     scale = min(640.0 / orig_w, 640.0 / orig_h)
@@ -249,7 +245,7 @@ def detect_with_onnx(image: np.ndarray, conf_threshold: float = 0.30) -> tuple[i
     mask = predictions[:, 4] >= conf_threshold
     valid = predictions[mask]
     if len(valid) == 0:
-        return None
+        return []
 
     boxes: list[list[int]] = []
     confidences: list[float] = []
@@ -259,24 +255,36 @@ def detect_with_onnx(image: np.ndarray, conf_threshold: float = 0.30) -> tuple[i
         y1 = int(((cy - h / 2.0) - pad_y) / scale)
         bw = int(w / scale)
         bh = int(h / scale)
+        if bw < 12 or bh < 6:
+            continue
         boxes.append([x1, y1, bw, bh])
         confidences.append(conf)
 
-    indices = cv2.dnn.NMSBoxes(boxes, confidences, conf_threshold, 0.45)
+    if not boxes:
+        return []
+
+    # Strict NMS (IoU 0.40) prevents duplicate overlapping boxes on the same plate
+    indices = cv2.dnn.NMSBoxes(boxes, confidences, conf_threshold, 0.40)
     if len(indices) == 0:
-        return None
+        return []
 
-    best_idx = int(np.array(indices).flatten()[0])
-    bx, by, bw, bh = boxes[best_idx]
-    det_conf = round(float(confidences[best_idx]), 4)
+    flat_indices = [int(i) for i in np.array(indices).flatten()]
+    flat_indices.sort(key=lambda idx: confidences[idx], reverse=True)
 
-    margin_x = int(bw * 0.04)
-    margin_y = int(bh * 0.04)
-    bx = max(0, bx - margin_x)
-    by = max(0, by - margin_y)
-    bw = min(orig_w - bx, bw + 2 * margin_x)
-    bh = min(orig_h - by, bh + 2 * margin_y)
-    return (bx, by, bw, bh, det_conf)
+    results: list[tuple[int, int, int, int, float]] = []
+    for idx in flat_indices[:max_plates]:
+        bx, by, bw, bh = boxes[idx]
+        det_conf = round(float(confidences[idx]), 4)
+
+        margin_x = int(bw * 0.04)
+        margin_y = int(bh * 0.04)
+        bx = max(0, bx - margin_x)
+        by = max(0, by - margin_y)
+        bw = min(orig_w - bx, bw + 2 * margin_x)
+        bh = min(orig_h - by, bh + 2 * margin_y)
+        results.append((bx, by, bw, bh, det_conf))
+
+    return results
 
 
 def _diagnose_failure(gray: np.ndarray, detected: bool, extracted_text: str, crop_shape: tuple[int, int] | None) -> dict | None:
@@ -364,12 +372,12 @@ def process_vehicle_image(image_bytes: bytes) -> dict:
     morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (19, 5)))
     t_stage4 = round((time.perf_counter() - t4) * 1000, 2)
 
-    # Stage 5: Generalized Unified YOLOv8n ONNX Localization
+    # Stage 5: Generalized Unified YOLOv8n ONNX Localization (Multi-Plate Capable)
     t5 = time.perf_counter()
-    det = detect_with_onnx(original)
+    all_dets = detect_all_plates_onnx(original)
     t_stage5 = round((time.perf_counter() - t5) * 1000, 2)
 
-    # Stage 6: ROI Crop, Connected-Component Cleaning, Deskew & RapidOCR
+    # Stage 6: ROI Crop, Connected-Component Cleaning, Deskew & RapidOCR for each detection
     t6 = time.perf_counter()
     annotated = original.copy()
     raw_crop_bgr = np.zeros((60, 200, 3), dtype=np.uint8)
@@ -380,20 +388,38 @@ def process_vehicle_image(image_bytes: bytes) -> dict:
     ocr_confidence: float | None = None
     geometry: dict | None = None
     crop_shape: tuple[int, int] | None = None
+    detections_list: list[dict] = []
 
-    if det is not None:
-        bx, by, bw, bh, detection_confidence = det
-        cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), (0, 230, 255), 3)
-        raw_crop_bgr = original[by:by + bh, bx:bx + bw].copy()
-        crop = gray[by:by + bh, bx:bx + bw]
-        crop_shape = crop.shape[:2]
+    for idx, (bx, by, bw, bh, det_conf) in enumerate(all_dets):
+        box_color = (0, 230, 255) if idx == 0 else (52, 211, 153)
+        cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), box_color, 3)
 
+        crop_bgr = original[by:by + bh, bx:bx + bw].copy()
+        crop_gray = gray[by:by + bh, bx:bx + bw]
         angle_deg = 0.0
-        if crop.size > 0:
-            text, raw_ocr_text, ocr_confidence, angle_deg, _, binarized_plate = read_plate_ocr(crop)
-            extracted_text = text if len(text) >= 3 else "Plate localized (low OCR resolution)"
+        det_text = "Plate localized (low OCR resolution)"
+        det_raw_ocr = ""
+        det_ocr_conf: float | None = None
+        det_bin_img = np.zeros((60, 200), dtype=np.uint8)
 
-        geometry = {
+        if crop_gray.size > 0:
+            text, r_ocr, o_conf, angle_deg, _, det_bin_img = read_plate_ocr(crop_gray)
+            det_text = text if len(text) >= 3 else "Plate localized (low OCR resolution)"
+            det_raw_ocr = r_ocr
+            det_ocr_conf = o_conf
+
+        cv2.putText(
+            annotated,
+            f"#{idx + 1} {det_text}",
+            (bx, max(18, by - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            box_color,
+            2,
+            cv2.LINE_AA,
+        )
+
+        det_geom = {
             "bbox": [bx, by, bx + bw, by + bh],
             "x": bx,
             "y": by,
@@ -404,16 +430,38 @@ def process_vehicle_image(image_bytes: bytes) -> dict:
             "frame_width": proc_w,
             "frame_height": proc_h,
         }
+
+        detections_list.append({
+            "index": idx + 1,
+            "plate_number": det_text,
+            "raw_ocr_text": det_raw_ocr,
+            "detection_confidence": det_conf,
+            "ocr_confidence": det_ocr_conf,
+            "geometry": det_geom,
+            "raw_crop_base64": encode_image_base64(crop_bgr),
+            "binarized_crop_base64": encode_image_base64(det_bin_img),
+        })
+
+        if idx == 0:
+            raw_crop_bgr = crop_bgr
+            binarized_plate = det_bin_img
+            extracted_text = det_text
+            raw_ocr_text = det_raw_ocr
+            detection_confidence = det_conf
+            ocr_confidence = det_ocr_conf
+            geometry = det_geom
+            crop_shape = crop_gray.shape[:2]
+
     t_stage6 = round((time.perf_counter() - t6) * 1000, 2)
     pipeline_compute_ms = round((time.perf_counter() - t_start) * 1000, 2)
 
-    failure_analysis = _diagnose_failure(gray, det is not None, extracted_text, crop_shape)
+    failure_analysis = _diagnose_failure(gray, len(all_dets) > 0, extracted_text, crop_shape)
 
     stages_payload = {
         "original": encode_image_base64(original),
         "enhanced_gray": encode_image_base64(enhanced),
         "sobel_x_edges": encode_image_base64(grad_x_u8),
-        "canny_edges": encode_image_base64(grad_x_u8),  # backwards-compatible key
+        "canny_edges": encode_image_base64(grad_x_u8),
         "morph_mask": encode_image_base64(morph),
         "localized": encode_image_base64(annotated),
         "binarized_plate": encode_image_base64(binarized_plate),
@@ -423,7 +471,9 @@ def process_vehicle_image(image_bytes: bytes) -> dict:
     return {
         "plate_number": extracted_text,
         "raw_ocr_text": raw_ocr_text,
-        "detected": det is not None,
+        "detected": len(all_dets) > 0,
+        "plate_count": len(detections_list),
+        "detections": detections_list,
         "detection_confidence": detection_confidence,
         "ocr_confidence": ocr_confidence,
         "geometry": geometry,

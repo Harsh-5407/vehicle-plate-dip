@@ -1,4 +1,3 @@
-import DipLaboratoryPage from "./pages/DipLaboratoryPage";
 import React, { useState, useEffect } from "react";
 import {
   LayoutDashboard,
@@ -7,6 +6,7 @@ import {
   BarChart3,
   History,
   BookOpen,
+  ShieldAlert,
   Menu,
   X,
   Trash2,
@@ -14,13 +14,16 @@ import {
 import { API_BASE_URL } from "./constants/dipData";
 import OverviewPage from "./pages/OverviewPage";
 import PlateRecognitionPage from "./pages/PlateRecognitionPage";
+import DipLaboratoryPage from "./pages/DipLaboratoryPage";
+import PerformanceAnalysisPage from "./pages/PerformanceAnalysisPage";
 import AboutTechniquesPage from "./pages/AboutTechniquesPage";
+import EnforcementDemoPage from "./pages/EnforcementDemoPage";
 
-const NAV_ITEMS = [
+const CORE_NAV_ITEMS = [
   { id: "overview", label: "Overview", icon: LayoutDashboard, badge: null },
   { id: "recognition", label: "Plate Recognition", icon: Cpu, badge: "Core" },
-  { id: "laboratory", label: "DIP Laboratory", icon: FlaskConical, badge: "Interactive" },
-  { id: "performance", label: "Performance Analysis", icon: BarChart3, badge: "Phase 3" },
+  { id: "laboratory", label: "DIP Laboratory", icon: FlaskConical, badge: "Lab" },
+  { id: "performance", label: "Performance Analysis", icon: BarChart3, badge: null },
   { id: "history", label: "Processing History", icon: History, badge: null },
   { id: "techniques", label: "About / DIP Techniques", icon: BookOpen, badge: null },
 ];
@@ -29,6 +32,7 @@ export default function App() {
   const [activePage, setActivePage] = useState("overview");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [backendHealth, setBackendHealth] = useState(null);
+  const [demoPrefillPlate, setDemoPrefillPlate] = useState("");
   const [recentRuns, setRecentRuns] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("visionplate_runs") || "[]");
@@ -56,6 +60,14 @@ export default function App() {
     });
   };
 
+  const handleDeleteSingleRun = (runId) => {
+    setRecentRuns((prev) => {
+      const updated = prev.filter((r) => r.id !== runId);
+      localStorage.setItem("visionplate_runs", JSON.stringify(updated));
+      return updated;
+    });
+  };
+
   const handleClearHistory = () => {
     setRecentRuns([]);
     localStorage.removeItem("visionplate_runs");
@@ -65,6 +77,12 @@ export default function App() {
     setActivePage(pageId);
     setMobileMenuOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleSendToAppliedDemo = (plateText) => {
+    const cleaned = (plateText || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+    setDemoPrefillPlate(cleaned);
+    navigateTo("applied-demo");
   };
 
   return (
@@ -105,7 +123,10 @@ export default function App() {
           </div>
 
           <nav className="space-y-1">
-            {NAV_ITEMS.map((item) => {
+            <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+              DIP &amp; ANPR Laboratory
+            </p>
+            {CORE_NAV_ITEMS.map((item) => {
               const Icon = item.icon;
               const isActive = activePage === item.id;
               return (
@@ -132,6 +153,30 @@ export default function App() {
               );
             })}
           </nav>
+
+          {/* Secondary Optional Applied Demo Section */}
+          <div className="pt-3 border-t border-slate-800/80 space-y-1">
+            <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+              Applied Demo (Optional)
+            </p>
+            <button
+              type="button"
+              onClick={() => navigateTo("applied-demo")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition ${
+                activePage === "applied-demo"
+                  ? "bg-amber-500/15 text-amber-300 border border-amber-500/40"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-900/70"
+              }`}
+            >
+              <span className="flex items-center gap-2.5">
+                <ShieldAlert className="w-4 h-4 text-amber-400" />
+                <span>RTO &amp; Police Demo</span>
+              </span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300">
+                Synthetic
+              </span>
+            </button>
+          </div>
         </div>
 
         <div className="bg-[#0D1322] border border-slate-800 rounded-xl p-3 text-[11px] text-slate-400 space-y-1">
@@ -152,10 +197,19 @@ export default function App() {
           )}
 
           {activePage === "recognition" && (
-            <PlateRecognitionPage onRunRecorded={handleRunRecorded} />
+            <PlateRecognitionPage
+              onRunRecorded={handleRunRecorded}
+              onSendToAppliedDemo={handleSendToAppliedDemo}
+            />
           )}
 
+          {activePage === "laboratory" && <DipLaboratoryPage />}
+
+          {activePage === "performance" && <PerformanceAnalysisPage recentRuns={recentRuns} />}
+
           {activePage === "techniques" && <AboutTechniquesPage />}
+
+          {activePage === "applied-demo" && <EnforcementDemoPage prefillPlate={demoPrefillPlate} />}
 
           {activePage === "history" && (
             <div className="bg-[#0D1322] border border-slate-800/90 rounded-2xl p-6 space-y-4">
@@ -163,7 +217,8 @@ export default function App() {
                 <div>
                   <h2 className="text-base font-bold text-white">Local Session Processing History</h2>
                   <p className="text-xs text-slate-400">
-                    Stored locally in your browser (`localStorage`, max 15 runs). No images are permanently retained on the server.
+                    Privacy &amp; Retention Notice: Stored locally in your browser (`localStorage`,
+                    capped at 15 runs). Uploaded images are never stored permanently on the server.
                   </p>
                 </div>
                 {recentRuns.length > 0 && (
@@ -180,7 +235,8 @@ export default function App() {
 
               {recentRuns.length === 0 ? (
                 <p className="text-xs text-slate-400 py-8 text-center">
-                  No runs recorded yet. Process an image in <strong>Plate Recognition</strong> to populate history.
+                  No runs recorded yet. Process an image in <strong>Plate Recognition</strong> to
+                  populate history.
                 </p>
               ) : (
                 <div className="space-y-2.5">
@@ -189,41 +245,39 @@ export default function App() {
                       key={run.id}
                       className="bg-[#090E1A] border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-4"
                     >
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
                         {run.thumbnail && (
                           <img
                             src={run.thumbnail}
                             alt={run.filename}
-                            className="w-14 h-10 rounded object-cover border border-slate-700"
+                            className="w-14 h-10 rounded object-cover border border-slate-700 shrink-0"
                           />
                         )}
-                        <div>
-                          <p className="text-xs font-semibold text-white">{run.filename}</p>
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold text-white truncate">{run.filename}</p>
                           <p className="text-[11px] text-slate-400">
                             {run.timestamp} • Compute: {run.computeMs} ms
+                            {run.groundTruth ? ` • GT: ${run.groundTruth}` : ""}
                           </p>
                         </div>
                       </div>
-                      <span className="font-mono text-xs font-bold px-3 py-1 rounded bg-amber-400 text-slate-950">
-                        {run.plateNumber}
-                      </span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="font-mono text-xs font-bold px-3 py-1 rounded bg-amber-400 text-slate-950">
+                          {run.plateNumber}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteSingleRun(run.id)}
+                          title="Delete entry"
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-slate-900"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
               )}
-            </div>
-          )}
-
-          {activePage === "laboratory" && <DipLaboratoryPage />}
-
-          {activePage === "performance" && (
-            <div className="bg-[#0D1322] border border-slate-800 rounded-2xl p-8 text-center space-y-2">
-              <BarChart3 className="w-8 h-8 text-amber-400 mx-auto" />
-              <h2 className="text-lg font-bold text-white">Performance &amp; Benchmark Analysis</h2>
-              <p className="text-xs text-slate-400 max-w-lg mx-auto">
-                Scheduled for <strong>Phase 3</strong>: Multi-condition test gallery, separate localization
-                vs. character-level accuracy metrics, runtime charts, and downloadable PDF lab reports.
-              </p>
             </div>
           )}
         </div>

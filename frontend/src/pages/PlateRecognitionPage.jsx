@@ -1,7 +1,6 @@
 import React, { useState } from "react";
 import {
   Upload,
-  CheckCircle2,
   AlertCircle,
   Clock,
   Layers,
@@ -15,14 +14,17 @@ import {
   EyeOff,
   Info,
   Compass,
+  FileText,
+  ArrowRight,
 } from "lucide-react";
 import { API_BASE_URL, SAMPLE_PRESETS, DIP_STAGES_META } from "../constants/dipData";
 import BeforeAfterSlider from "../components/BeforeAfterSlider";
 import ImageInspectorModal from "../components/ImageInspectorModal";
+import { exportProcessingReportPDF } from "../utils/pdfReport";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 
-export default function PlateRecognitionPage({ onRunRecorded }) {
+export default function PlateRecognitionPage({ onRunRecorded, onSendToAppliedDemo }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [fileMeta, setFileMeta] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
@@ -33,7 +35,8 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // Interactive Stage Stepper & Visualization Toggles
+  // Multi-plate detection index & visualization toggles
+  const [selectedDetIdx, setSelectedDetIdx] = useState(0);
   const [selectedStageKey, setSelectedStageKey] = useState("localized");
   const [showOverlay, setShowOverlay] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -70,6 +73,7 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
     setSelectedFile(file);
     setPreviewUrl(url);
     setResult(null);
+    setSelectedDetIdx(0);
     setError("");
     setManualGroundTruth(preset?.groundTruth || "");
     extractImageMetadata(file, url);
@@ -94,6 +98,7 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
     setPreviewUrl(null);
     setActiveSample(null);
     setResult(null);
+    setSelectedDetIdx(0);
     setRoundTripMs(null);
     setError("");
     setManualGroundTruth("");
@@ -104,6 +109,7 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
     setLoading(true);
     setError("");
     setResult(null);
+    setSelectedDetIdx(0);
 
     const formData = new FormData();
     formData.append("file", fileToProcess);
@@ -134,7 +140,11 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
       if (onRunRecorded) {
         onRunRecorded({
           id: `${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }),
           filename: fileToProcess.name,
           plateNumber: data.plate_number,
           detected: data.detected,
@@ -167,9 +177,19 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
     }
   };
 
+  // Resolve currently inspected detection (supports single & multi-plate frames)
+  const activeDetection = result?.detections?.[selectedDetIdx] || null;
+  const activePlateText = activeDetection?.plate_number || result?.plate_number || "— — — —";
+  const activeRawOcr = activeDetection?.raw_ocr_text || result?.raw_ocr_text || "";
+  const activeDetConf = activeDetection?.detection_confidence ?? result?.detection_confidence;
+  const activeOcrConf = activeDetection?.ocr_confidence ?? result?.ocr_confidence;
+  const activeGeom = activeDetection?.geometry || result?.geometry;
+  const activeBinarizedCrop =
+    activeDetection?.binarized_crop_base64 || result?.stages?.binarized_plate;
+
   const handleCopyPlate = () => {
     if (!result?.plate_number) return;
-    navigator.clipboard.writeText(result.plate_number);
+    navigator.clipboard.writeText(activePlateText);
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
@@ -186,15 +206,16 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
     DIP_STAGES_META.find((s) => s.key === selectedStageKey) || DIP_STAGES_META[0];
 
   // Ground truth character comparison
-  const cleanPred = (result?.plate_number || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  const cleanPred = activePlateText.replace(/[^A-Z0-9]/gi, "").toUpperCase();
   const cleanGT = manualGroundTruth.replace(/[^A-Z0-9]/gi, "").toUpperCase();
   let matchingChars = 0;
+  let charAccuracy = "0.0";
   if (cleanGT && result?.detected) {
     const maxLen = Math.max(cleanGT.length, cleanPred.length);
     for (let i = 0; i < Math.min(cleanGT.length, cleanPred.length); i++) {
       if (cleanGT[i] === cleanPred[i]) matchingChars++;
     }
-    var charAccuracy = maxLen > 0 ? ((matchingChars / maxLen) * 100).toFixed(1) : "0.0";
+    charAccuracy = maxLen > 0 ? ((matchingChars / maxLen) * 100).toFixed(1) : "0.0";
   }
 
   return (
@@ -254,7 +275,11 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                         onClick={() => setShowOverlay(!showOverlay)}
                         className="absolute bottom-2 right-2 px-2.5 py-1 rounded-lg bg-slate-950/90 border border-slate-700 text-[11px] font-medium text-cyan-300 flex items-center gap-1.5 hover:border-cyan-500"
                       >
-                        {showOverlay ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        {showOverlay ? (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        ) : (
+                          <Eye className="w-3.5 h-3.5" />
+                        )}
                         {showOverlay ? "Hide Box Overlay" : "Show Box Overlay"}
                       </button>
                     )}
@@ -293,7 +318,8 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                   />
                   <ImageIcon className="w-10 h-10 mx-auto text-slate-500" />
                   <p className="text-sm font-medium text-slate-200">
-                    Drop vehicle image here or <span className="text-cyan-400 underline">browse files</span>
+                    Drop vehicle image here or{" "}
+                    <span className="text-cyan-400 underline">browse files</span>
                   </p>
                   <p className="text-xs text-slate-500">
                     Supports high-resolution HSRP plates, commercial yellow plates &amp; CCTV frames
@@ -347,7 +373,9 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
             disabled={!selectedFile || loading}
             className="w-full py-3 rounded-xl font-semibold text-sm bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-800 disabled:text-slate-500 text-white transition shadow-lg shadow-cyan-600/20"
           >
-            {loading ? "Executing 6-Stage DIP & RapidOCR Pipeline..." : "Execute 6-Stage ANPR Pipeline"}
+            {loading
+              ? "Executing 6-Stage DIP & RapidOCR Pipeline..."
+              : "Execute 6-Stage ANPR Pipeline"}
           </button>
         </section>
 
@@ -383,14 +411,14 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
               </div>
             )}
 
-            {/* Extracted Plate Number Box */}
+            {/* Extracted Plate Number Box + Multi-Plate Switcher + PDF Export */}
             <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-4 text-center">
               <p className="text-[11px] uppercase tracking-widest text-slate-400 mb-2">
                 Recognized Registration String
               </p>
               <div className="flex items-center justify-center gap-2">
                 <div className="px-5 py-2 rounded-lg bg-amber-400 text-slate-950 font-mono font-extrabold text-2xl tracking-wider shadow">
-                  {result ? result.plate_number : "— — — —"}
+                  {activePlateText}
                 </div>
                 {result?.plate_number && (
                   <button
@@ -399,32 +427,93 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                     title="Copy plate text"
                     className="p-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300"
                   >
-                    {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    {copied ? (
+                      <Check className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-4 h-4" />
+                    )}
                   </button>
                 )}
               </div>
 
-              {result?.raw_ocr_text && result.raw_ocr_text !== result.plate_number && (
+              {activeRawOcr && activeRawOcr !== activePlateText && (
                 <p className="text-[11px] text-slate-400 mt-2">
-                  Raw OCR Output: <span className="font-mono text-slate-200">{result.raw_ocr_text}</span>{" "}
+                  Raw OCR Output: <span className="font-mono text-slate-200">{activeRawOcr}</span>{" "}
                   <span className="text-cyan-400">(RTO Positional Syntax Refined)</span>
                 </p>
+              )}
+
+              {/* Multi-Plate Selector Pills */}
+              {result?.detections?.length > 1 && (
+                <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5">
+                  <span className="text-[11px] text-slate-400 mr-1">
+                    {result.detections.length} Plates Detected:
+                  </span>
+                  {result.detections.map((d, i) => (
+                    <button
+                      key={d.index}
+                      type="button"
+                      onClick={() => setSelectedDetIdx(i)}
+                      className={`px-2.5 py-1 rounded-lg font-mono text-xs font-bold border transition ${
+                        selectedDetIdx === i
+                          ? "bg-cyan-500/20 border-cyan-400 text-cyan-300"
+                          : "bg-slate-900 border-slate-700 text-slate-400"
+                      }`}
+                    >
+                      #{d.index} {d.plate_number}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Export PDF Lab Report & Applied Demo Actions */}
+              {result?.detected && (
+                <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      exportProcessingReportPDF({
+                        result,
+                        filename: fileMeta?.name || "sample_plate.jpg",
+                        groundTruth: manualGroundTruth,
+                        selectedDetection: activeDetection,
+                      })
+                    }
+                    className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 transition"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    Export PDF Lab Report
+                  </button>
+
+                  {onSendToAppliedDemo && (
+                    <button
+                      type="button"
+                      onClick={() => onSendToAppliedDemo(activePlateText)}
+                      className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1 transition"
+                    >
+                      <span>Test in Applied RTO Demo</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               )}
             </div>
 
             {/* Segmented ROI Crop + Download/Zoom */}
             <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-3.5">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-medium text-slate-300">Segmented &amp; Binarized Plate ROI</span>
-                {result?.stages?.binarized_plate && (
+                <span className="text-xs font-medium text-slate-300">
+                  Segmented &amp; Binarized Plate ROI
+                </span>
+                {activeBinarizedCrop && (
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
                       onClick={() =>
                         setInspector({
-                          src: result.stages.binarized_plate,
+                          src: activeBinarizedCrop,
                           title: "Segmented & Binarized ROI",
-                          subtitle: `Extracted Plate: ${result.plate_number}`,
+                          subtitle: `Extracted Plate: ${activePlateText}`,
                         })
                       }
                       className="text-[11px] px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 flex items-center gap-1"
@@ -435,7 +524,7 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                     <button
                       type="button"
                       onClick={() =>
-                        downloadBase64(result.stages.binarized_plate, `${result.plate_number || "plate"}-roi.jpg`)
+                        downloadBase64(activeBinarizedCrop, `${activePlateText || "plate"}-roi.jpg`)
                       }
                       className="text-[11px] px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 flex items-center gap-1"
                     >
@@ -446,9 +535,9 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                 )}
               </div>
               <div className="h-20 rounded-lg bg-slate-950 border border-slate-800/80 flex items-center justify-center overflow-hidden p-2">
-                {result?.stages?.binarized_plate ? (
+                {activeBinarizedCrop ? (
                   <img
-                    src={result.stages.binarized_plate}
+                    src={activeBinarizedCrop}
                     alt="Binarized ROI"
                     className="max-h-full max-w-full object-contain rounded"
                   />
@@ -463,16 +552,16 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
               <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-3">
                 <p className="text-[10px] text-slate-400">Detector Confidence (YOLOv8n)</p>
                 <p className="font-mono font-semibold text-white mt-0.5">
-                  {result?.detection_confidence != null
-                    ? `${(result.detection_confidence * 100).toFixed(1)}%`
+                  {activeDetConf != null
+                    ? `${(activeDetConf * 100).toFixed(1)}%`
                     : "Not exposed / N/A"}
                 </p>
               </div>
               <div className="bg-[#090E1A] border border-slate-800 rounded-xl p-3">
                 <p className="text-[10px] text-slate-400">OCR String Confidence (RapidOCR)</p>
                 <p className="font-mono font-semibold text-white mt-0.5">
-                  {result?.ocr_confidence != null
-                    ? `${(result.ocr_confidence * 100).toFixed(1)}%`
+                  {activeOcrConf != null
+                    ? `${(activeOcrConf * 100).toFixed(1)}%`
                     : "Not exposed / N/A"}
                 </p>
               </div>
@@ -482,9 +571,7 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                   Backend Compute / Total
                 </p>
                 <p className="font-mono font-semibold text-slate-200 mt-0.5">
-                  {result?.pipeline_compute_ms
-                    ? `${result.pipeline_compute_ms} ms`
-                    : "—"}{" "}
+                  {result?.pipeline_compute_ms ? `${result.pipeline_compute_ms} ms` : "—"}{" "}
                   <span className="text-[10px] text-slate-500">
                     {roundTripMs ? `(${roundTripMs} ms RTT)` : ""}
                   </span>
@@ -496,8 +583,8 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                   Plate Geometry &amp; Deskew
                 </p>
                 <p className="font-mono font-semibold text-slate-200 mt-0.5">
-                  {result?.geometry
-                    ? `${result.geometry.width}×${result.geometry.height}px (${result.geometry.aspect_ratio}:1) • ${result.geometry.deskew_angle_deg}°`
+                  {activeGeom
+                    ? `${activeGeom.width}×${activeGeom.height}px (${activeGeom.aspect_ratio}:1) • ${activeGeom.deskew_angle_deg}°`
                     : "—"}
                 </p>
               </div>
@@ -532,7 +619,9 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
           </div>
 
           <p className="text-[11px] text-slate-500 border-t border-slate-800/80 pt-3">
-            Academic Demonstration Notice: Automated OCR predictions may contain character substitutions under motion blur or low light and must be verified manually before operational use.
+            Academic Demonstration Notice: Automated OCR predictions may contain character
+            substitutions under motion blur or low light and must be verified manually before
+            operational use.
           </p>
         </section>
       </div>
@@ -547,13 +636,17 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                 Interactive Six-Stage DIP Pipeline Inspector
               </h2>
               <p className="text-xs text-slate-400">
-                Click any completed stage step below to inspect its output matrix, runtime, and mathematical role
+                Click any completed stage step below to inspect its output matrix, runtime, and
+                mathematical role
               </p>
             </div>
             <button
               type="button"
               onClick={() =>
-                downloadBase64(result.stages.localized, `${result.plate_number || "detected"}-localized.jpg`)
+                downloadBase64(
+                  result.stages.localized,
+                  `${activePlateText || "detected"}-localized.jpg`
+                )
               }
               className="px-3.5 py-2 rounded-xl bg-[#090E1A] hover:bg-slate-800 border border-slate-700 text-xs font-semibold text-cyan-300 flex items-center gap-1.5"
             >
@@ -640,15 +733,21 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                 <div className="p-3 rounded-lg bg-[#0D1322] border border-slate-800 space-y-2">
                   <div>
                     <p className="font-semibold text-cyan-300">What it does:</p>
-                    <p className="text-slate-300 mt-0.5 leading-relaxed">{activeStageMeta.whatItDoes}</p>
+                    <p className="text-slate-300 mt-0.5 leading-relaxed">
+                      {activeStageMeta.whatItDoes}
+                    </p>
                   </div>
                   <div>
                     <p className="font-semibold text-emerald-300">Why it is used:</p>
-                    <p className="text-slate-300 mt-0.5 leading-relaxed">{activeStageMeta.whyUsed}</p>
+                    <p className="text-slate-300 mt-0.5 leading-relaxed">
+                      {activeStageMeta.whyUsed}
+                    </p>
                   </div>
                   <div>
                     <p className="font-semibold text-amber-300">What changes in the output:</p>
-                    <p className="text-slate-300 mt-0.5 leading-relaxed">{activeStageMeta.whatChanges}</p>
+                    <p className="text-slate-300 mt-0.5 leading-relaxed">
+                      {activeStageMeta.whatChanges}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -668,7 +767,9 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                 type="button"
                 onClick={() => setSelectedStageKey(stage.key)}
                 className={`text-left bg-[#090E1A] rounded-xl p-2 border transition ${
-                  selectedStageKey === stage.key ? "border-cyan-400" : "border-slate-800 hover:border-slate-700"
+                  selectedStageKey === stage.key
+                    ? "border-cyan-400"
+                    : "border-slate-800 hover:border-slate-700"
                 }`}
               >
                 <div className="h-24 bg-slate-950 rounded-lg overflow-hidden flex items-center justify-center mb-1.5">
@@ -678,7 +779,9 @@ export default function PlateRecognitionPage({ onRunRecorded }) {
                     className="max-h-full max-w-full object-contain"
                   />
                 </div>
-                <p className="text-[11px] font-semibold text-slate-200 truncate">{stage.shortTitle}</p>
+                <p className="text-[11px] font-semibold text-slate-200 truncate">
+                  {stage.shortTitle}
+                </p>
               </button>
             ))}
           </div>
